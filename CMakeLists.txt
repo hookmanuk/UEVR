@@ -419,6 +419,51 @@ target_link_libraries(example_plugin PUBLIC
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target autoscaler_plugin
+set(CMKR_TARGET autoscaler_plugin)
+set(autoscaler_plugin_SOURCES "")
+
+list(APPEND autoscaler_plugin_SOURCES
+	"examples/autoscaler_plugin/Plugin.cpp"
+)
+
+list(APPEND autoscaler_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${autoscaler_plugin_SOURCES})
+add_library(autoscaler_plugin SHARED)
+
+if(autoscaler_plugin_SOURCES)
+	target_sources(autoscaler_plugin PRIVATE ${autoscaler_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${autoscaler_plugin_SOURCES})
+
+target_compile_features(autoscaler_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(autoscaler_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(autoscaler_plugin PUBLIC
+	plugin_renderlib
+)
+
+target_include_directories(autoscaler_plugin PUBLIC
+	"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/include"
+)
+
+target_link_libraries(autoscaler_plugin PUBLIC
+	"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/lib/x64/nvml.lib"
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target sdk-test
 set(CMKR_TARGET sdk-test)
 set(sdk-test_SOURCES "")

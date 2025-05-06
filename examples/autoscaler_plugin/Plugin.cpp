@@ -39,6 +39,8 @@ SOFTWARE.
 
 #include "uevr/Plugin.hpp"
 
+#include <C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\include\nvml.h>
+
 using namespace uevr;
 
 #define PLUGIN_LOG_ONCE(...) \
@@ -519,6 +521,29 @@ private:
         return true;
     }
 
+    int get_gpu_usage() {
+        static bool initialized = false;
+        static nvmlDevice_t device;
+
+        if (!initialized) {
+            API::get()->log_info("Init start");
+            if (nvmlInit() != NVML_SUCCESS)
+                return -1;
+            if (nvmlDeviceGetHandleByIndex(0, &device) != NVML_SUCCESS)
+                return -1;
+            initialized = true;
+            API::get()->log_info("Init done");
+        }
+
+        nvmlUtilization_t utilization;
+        if (nvmlDeviceGetUtilizationRates(device, &utilization) == NVML_SUCCESS) {
+            API::get()->log_info("Returning usage");
+            return utilization.gpu;
+        }
+
+        return -1;
+    }
+    
     void internal_frame() {
         API::get()->log_info("Internal frame start");
         if (ImGui::Begin("Super Cool Plugin")) {
@@ -563,7 +588,8 @@ private:
                 const auto value = API::UObjectHook::is_disabled();
 
                 API::UObjectHook::set_disabled(!value);
-            }
+            }            
+            ImGui::Text("GPU usage is %d%%", get_gpu_usage());
     #if defined(__clang__)
             ImGui::Text("Plugin Compiler: Clang");
     #elif defined(_MSC_VER)
@@ -576,6 +602,8 @@ private:
         }
         API::get()->log_info("Internal frame done");
     }
+
+    
 
 private:
     HWND m_wnd{};

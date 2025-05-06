@@ -155,6 +155,15 @@ type = "plugin"
 sources = ["examples/example_plugin/**.cpp", "examples/example_plugin/**.c"]
 headers = ["examples/example_plugin/**.hpp", "examples/example_plugin/**.h"]
 
+[target.autoscaler_plugin]
+type = "plugin"
+sources = ["examples/autoscaler_plugin/**.cpp", "examples/autoscaler_plugin/**.c"]
+headers = ["examples/autoscaler_plugin/**.hpp", "examples/autoscaler_plugin/**.h"]
+include-directories = ["C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/include"]
+link-libraries = [
+    "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/lib/x64/nvml.lib"
+]
+
 [target.sdk-test]
 type = "shared"
 sources = ["side-projects/sdk-test/**.cpp", "side-projects/sdk-test/**.c"]
