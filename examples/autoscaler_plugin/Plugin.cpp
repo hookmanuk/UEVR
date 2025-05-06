@@ -28,6 +28,7 @@ SOFTWARE.
 #include <codecvt>
 
 #include <Windows.h>
+#include <filesystem>
 
 // only really necessary if you want to render to the screen
 #include "imgui/imgui_impl_dx11.h"
@@ -40,6 +41,8 @@ SOFTWARE.
 #include "uevr/Plugin.hpp"
 
 #include <C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\include\nvml.h>
+#include "json.hpp"
+#include <fstream>
 
 using namespace uevr;
 
@@ -52,11 +55,12 @@ using namespace uevr;
 
 class ExamplePlugin : public uevr::Plugin {
 public:
-    ExamplePlugin() = default;
+    ExamplePlugin() = default;    
 
     void on_dllmain() override {}
 
     void on_initialize() override {
+        configpath = API::get()->get_persistent_dir(L"autoscalerconfig.json").string();    
         ImGui::CreateContext();
     }
 
@@ -177,7 +181,7 @@ public:
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
 
-            API::get()->log_info("Running imgui internal_frame");
+            //API::get()->log_info("Running imgui internal_frame");
             internal_frame();
 
             ImGui::EndFrame();
@@ -185,7 +189,104 @@ public:
         }
     }        
 
+    void on_post_engine_tick(API::UGameEngine* engine, float delta) override {
+        sinceincrease = sinceincrease + delta;
+        sincedecrease = sincedecrease + delta;
+        int usage = get_gpu_usage();
+        if (usage == -1) {
+            return;
+        }
+        // aim to keep the usage between 82 & 92 percent
+        // increase infrequently only by 5%, every 5 seconds at most, to prevent too many hitches
+        // decrease often and by 10%, every 0.5 seconds if needed, so we're not below target too long
+        if (usage <= usagelowerbound && screenpercentage < 100) {
+            framesunderbudget = framesunderbudget + 1;
+            if (framesunderbudget > increaseframesrequired) {
+                screenpercentage = screenpercentage + increaseresamount;
+                std::wstring command = L"r.ScreenPercentage ";
+                command.append(std::to_wstring(screenpercentage));
+                API::get()->sdk()->functions->execute_command(command.c_str());
+                lastchange = std::format("Increased res to: {}%% after {:.2f} secs. Usage was {}%%", static_cast<int>(screenpercentage),
+                    static_cast<float>(sinceincrease), static_cast<int>(usage));
+                API::get()->log_info(lastchange.c_str());
+                sinceincrease = 0;
+                framesunderbudget = 0;
+                lastchange_time = std::time(nullptr);
+            }
+        } else {
+            framesunderbudget = 0;
+        }
+        if (usage >= usageupperbound && screenpercentage >= 20) {
+            framesoverbudget = framesoverbudget + 1;
+            if (framesoverbudget > decreaseframesrequired) {
+                screenpercentage = screenpercentage - decreaseresamount;
+                std::wstring command = L"r.ScreenPercentage ";
+                command.append(std::to_wstring(screenpercentage));
+                API::get()->sdk()->functions->execute_command(command.c_str());
+                lastchange = std::format("Decreased res to:{}%% after {:.2f} secs. Usage was {}%%", static_cast<int>(screenpercentage), static_cast<float>(sinceincrease), static_cast<int>(usage));
+                API::get()->log_info(lastchange.c_str());                
+                sincedecrease = 0;
+                framesoverbudget = 0;
+                lastchange_time = std::time(nullptr);
+            }
+        } else {
+            framesoverbudget = 0;
+        }
+    }  
+
 private:
+    int screenpercentage = 50;
+    float sinceincrease = 0;
+    float sincedecrease = 0;
+    int framesoverbudget = 0;
+    int framesunderbudget = 0;
+    int usagelowerbound = 82;
+    int usageupperbound = 92;
+    int decreaseresamount = 2;
+    int increaseresamount = 1;    
+    int decreaseframesrequired = 10;
+    int increaseframesrequired = 20;
+    std::string lastchange = "";
+    std::time_t lastchange_time = std::time(0);
+    std::string configpath = "";
+
+    std::string get_dll_directory() {
+        HMODULE hModule = GetModuleHandle(NULL); // Get the handle of the current module (DLL or EXE)
+
+        if (hModule == nullptr) {
+            return ""; // Failed to get the module handle
+        }
+
+        char path[MAX_PATH] = {};                    // Buffer to store the path
+        GetModuleFileNameA(hModule, path, MAX_PATH); // Get the full path of the module (DLL or EXE)
+
+        // Use filesystem to extract the directory from the path
+        return std::filesystem::path(path).parent_path().string();
+    }
+
+    int get_gpu_usage() {
+        static bool initialized = false;
+        static nvmlDevice_t device;
+
+        if (!initialized) {
+            API::get()->log_info("Init start");
+            if (nvmlInit() != NVML_SUCCESS)
+                return -1;
+            if (nvmlDeviceGetHandleByIndex(0, &device) != NVML_SUCCESS)
+                return -1;
+            initialized = true;
+            API::get()->log_info("Init done");
+        }
+
+        nvmlUtilization_t utilization;
+        if (nvmlDeviceGetUtilizationRates(device, &utilization) == NVML_SUCCESS) {
+            //API::get()->log_info("Returning usage");
+            return utilization.gpu;
+        }
+
+        return -1;
+    }
+
     bool initialize_imgui() {
         API::get()->log_info("Init imgui");
 
@@ -229,86 +330,104 @@ private:
         return true;
     }
 
-    int get_gpu_usage() {
-        static bool initialized = false;
-        static nvmlDevice_t device;
+    // Load values from JSON config file
+    void load_config() {
+        std::ifstream configFile(configpath);
+        if (configFile.is_open()) {
+            nlohmann::json j;
+            configFile >> j;            
 
-        if (!initialized) {
-            API::get()->log_info("Init start");
-            if (nvmlInit() != NVML_SUCCESS)
-                return -1;
-            if (nvmlDeviceGetHandleByIndex(0, &device) != NVML_SUCCESS)
-                return -1;
-            initialized = true;
-            API::get()->log_info("Init done");
+            if (j.contains("usagelowerbound")) {
+                usagelowerbound = j["usagelowerbound"];
+            }
+            if (j.contains("usageupperbound")) {
+                usageupperbound = j["usageupperbound"];
+            }
+            if (j.contains("decreaseframesrequired")) {
+                usageupperbound = j["decreaseframesrequired"];
+            }
+            if (j.contains("increaseframesrequired")) {
+                usageupperbound = j["increaseframesrequired"];
+            }
+            if (j.contains("decreaseresamount")) {
+                usageupperbound = j["decreaseresamount"];
+            }
+            if (j.contains("increaseresamount")) {
+                usageupperbound = j["increaseresamount"];
+            }   
         }
+    }
 
-        nvmlUtilization_t utilization;
-        if (nvmlDeviceGetUtilizationRates(device, &utilization) == NVML_SUCCESS) {
-            API::get()->log_info("Returning usage");
-            return utilization.gpu;
+    void save_config() {
+        nlohmann::json j;
+        j["usagelowerbound"] = usagelowerbound;        
+        j["usageupperbound"] = usageupperbound;
+        j["decreaseframesrequired"] = decreaseframesrequired;
+        j["increaseframesrequired"] = increaseframesrequired;
+        j["decreaseresamount"] = decreaseresamount;
+        j["increaseresamount"] = increaseresamount;        
+
+        API::get()->log_info("Saving config");
+        std::ofstream configFile(configpath);
+        if (configFile.is_open()) {
+            API::get()->log_info("Opened file");
+            configFile << j.dump(4); // Pretty print with 4-space indent
         }
-
-        return -1;
     }
     
     void internal_frame() {
-        API::get()->log_info("Internal frame start");
-        if (ImGui::Begin("Super Cool Plugin")) {
-            API::get()->log_info("Internal frame in plugin");
-            ImGui::Text("Hello from the super cool plugin!");
-            ImGui::Text("Snap turn: %i", API::VR::is_snap_turn_enabled());
-            ImGui::Text("Decoupled pitch: %i", API::VR::is_decoupled_pitch_enabled());
-            if (ImGui::Button("Toggle snap turn")) {
-                API::VR::set_snap_turn_enabled(!API::VR::is_snap_turn_enabled());
-            }
-
-            if (ImGui::Button("Toggle decoupled pitch")) {
-                API::VR::set_decoupled_pitch_enabled(!API::VR::is_decoupled_pitch_enabled());
-            }
-
-            if (ImGui::Button("Screw up world scale")) {
-                API::VR::set_mod_value("VR_WorldScale", 1.337f);
-            }
-
-            if (ImGui::Button("Toggle GUI")) {
-                const bool enabled = API::VR::get_mod_value<bool>("VR_EnableGUI");
-                API::VR::set_mod_value("VR_EnableGUI", !enabled);
-            }
+        //API::get()->log_info("Internal frame start");
+        if (ImGui::Begin("Autoscaler")) {
+            //API::get()->log_info("Internal frame in plugin");                   
 
             static char input[256]{};
-            if (ImGui::InputText("Get mod value", input, sizeof(input))) {
+            
+            bool changed = false;
 
+            if (ImGui::SliderInt("Usage Lower Bound", &usagelowerbound, 60, 95)) {
+                changed = true;
+                if (usageupperbound <= usagelowerbound + 5) {
+                    usageupperbound = usagelowerbound + 5;
+                }
             }
-
-            std::string mod_value = API::VR::get_mod_value<std::string>(input);
-            ImGui::Text("Mod value: %s", mod_value.c_str());
-
-            if (ImGui::Button("Save Config")) {
-                API::VR::save_config();
-            }
-
-            if (ImGui::Button("Reload Config")) {
-                API::VR::reload_config();
-            }
-
-            if (ImGui::Button("Toggle UObjectHook disabled")) {
-                const auto value = API::UObjectHook::is_disabled();
-
-                API::UObjectHook::set_disabled(!value);
+            if (ImGui::SliderInt("Usage Upper Bound", &usageupperbound, 60, 95)) {
+                changed = true;
+                if (usagelowerbound >= usageupperbound - 5) {
+                    usagelowerbound = usageupperbound - 5;
+                }
             }            
-            ImGui::Text("GPU usage is %d%%", get_gpu_usage());
-    #if defined(__clang__)
-            ImGui::Text("Plugin Compiler: Clang");
-    #elif defined(_MSC_VER)
-            ImGui::Text("Plugin Compiler: Visual Studio");
-    #elif defined(__GNUC__)
-            ImGui::Text("Plugin Compiler: GCC");
-    #else
-            ImGui::Text("Plugin Compiler: Unknown");
-    #endif
+            if (ImGui::SliderInt("Frames Before Decreasing", &decreaseframesrequired, 1, 1000)) {
+                changed = true;                
+            }
+            if (ImGui::SliderInt("Frames Before Increasing", &increaseframesrequired, 1, 1000)) {
+                changed = true;
+            }
+            if (ImGui::SliderInt("Decrease Res By", &decreaseresamount, 1, 20)) {
+                changed = true;
+            }
+            if (ImGui::SliderInt("Increase Res By", &increaseresamount, 1, 20)) {
+                changed = true;
+            }
+
+
+            if (changed) {
+                save_config();
+            }
+                   
+            if (lastchange_time != 0) {
+                // Get current time
+                std::time_t now = std::time(nullptr);
+
+                // Calculate the difference in seconds
+                double seconds_diff = std::difftime(now, lastchange_time);
+                
+                // Print formatted time using ImGui
+                ImGui::Text("Last changed %.0f secs ago", seconds_diff);
+            }
+            ImGui::Text(lastchange.c_str());     
+            ImGui::Text("GPU usage is %d%%", get_gpu_usage());   
         }
-        API::get()->log_info("Internal frame done");
+        //API::get()->log_info("Internal frame done");
     }
 
     
