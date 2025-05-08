@@ -43,6 +43,7 @@ SOFTWARE.
 #include <C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\include\nvml.h>
 #include "json.hpp"
 #include <fstream>
+#include <chrono>
 
 using namespace uevr;
 
@@ -57,12 +58,13 @@ class ExamplePlugin : public uevr::Plugin {
 public:
     ExamplePlugin() = default;    
 
-    void on_dllmain() override {}
+    void on_dllmain() override {}    
 
-    void on_initialize() override {
-        configpath = API::get()->get_persistent_dir(L"autoscalerconfig.json").string();    
-        ImGui::CreateContext();
-    }
+    void on_initialize() override { 
+        configpath = API::get()->get_persistent_dir(L"autoscalerconfig.json").string();
+        load_config();
+        ImGui::CreateContext();        
+    }    
 
     void on_present() override {
         std::scoped_lock _{m_imgui_mutex};
@@ -100,8 +102,36 @@ public:
                 ImGui_ImplDX12_NewFrame();
                 g_d3d12.render_imgui();
             }
-        }
+        }        
     }    
+
+    //this function doesnt work, trying to fix the eye mismatch whilst in loading screen
+    void check_for_loading_screen() {
+        auto now = std::chrono::high_resolution_clock::now();
+
+        // Calculate the difference in seconds
+        std::chrono::duration<double> elapsed = now - lasttick;
+
+        // Print formatted time using ImGui
+        API::get()->log_info("tick was %.2f secs ago", elapsed.count());
+
+        if (elapsed.count() > 0.2) {
+            if (!isloading2d) {
+                API::get()->log_info("set to 2d");
+                API::get()->param()->vr->set_mod_value("VR_ExtremeCompatibilityMode", "true");
+                isloading2d = true;
+            } else if (elapsed.count() > 1.5) {
+                API::get()->log_info("set to 3d");
+                API::get()->param()->vr->set_mod_value("VR_ExtremeCompatibilityMode", "false");
+            }            
+        } else {
+            if (isloading2d) {
+                API::get()->log_info("set to 3d");
+                API::get()->param()->vr->set_mod_value("VR_ExtremeCompatibilityMode", "false");
+                isloading2d = false;
+            }
+        }
+    }
 
     void on_device_reset() override {
         PLUGIN_LOG_ONCE("Example Device Reset");
@@ -142,7 +172,7 @@ public:
         std::scoped_lock _{m_imgui_mutex};
 
         ImGui_ImplDX11_NewFrame();
-        g_d3d11.render_imgui_vr(context, rtv);
+        g_d3d11.render_imgui_vr(context, rtv);        
     }
 
     void on_post_render_vr_framework_dx12(ID3D12GraphicsCommandList* command_list, ID3D12Resource* rt, D3D12_CPU_DESCRIPTOR_HANDLE* rtv) override {
@@ -163,7 +193,7 @@ public:
         std::scoped_lock _{m_imgui_mutex};
 
         ImGui_ImplDX12_NewFrame();
-        g_d3d12.render_imgui_vr(command_list, rtv);
+        g_d3d12.render_imgui_vr(command_list, rtv);        
     }
 
     bool on_message(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) override { 
@@ -186,7 +216,7 @@ public:
 
             ImGui::EndFrame();
             ImGui::Render();
-        }
+        }        
     }        
 
     void on_post_engine_tick(API::UGameEngine* engine, float delta) override {
@@ -198,14 +228,12 @@ public:
         }
         // aim to keep the usage between 82 & 92 percent
         // increase infrequently only by 5%, every 5 seconds at most, to prevent too many hitches
-        // decrease often and by 10%, every 0.5 seconds if needed, so we're not below target too long
+        // decrease often and by 10%, every 0.5 seconds if needed, so we're not below target too long        
         if (usage <= usagelowerbound && screenpercentage < 100) {
             framesunderbudget = framesunderbudget + 1;
             if (framesunderbudget > increaseframesrequired) {
                 screenpercentage = screenpercentage + increaseresamount;
-                std::wstring command = L"r.ScreenPercentage ";
-                command.append(std::to_wstring(screenpercentage));
-                API::get()->sdk()->functions->execute_command(command.c_str());
+                
                 lastchange = std::format("Increased res to: {}%% after {:.2f} secs. Usage was {}%%", static_cast<int>(screenpercentage),
                     static_cast<float>(sinceincrease), static_cast<int>(usage));
                 API::get()->log_info(lastchange.c_str());
@@ -220,9 +248,7 @@ public:
             framesoverbudget = framesoverbudget + 1;
             if (framesoverbudget > decreaseframesrequired) {
                 screenpercentage = screenpercentage - decreaseresamount;
-                std::wstring command = L"r.ScreenPercentage ";
-                command.append(std::to_wstring(screenpercentage));
-                API::get()->sdk()->functions->execute_command(command.c_str());
+
                 lastchange = std::format("Decreased res to:{}%% after {:.2f} secs. Usage was {}%%", static_cast<int>(screenpercentage), static_cast<float>(sinceincrease), static_cast<int>(usage));
                 API::get()->log_info(lastchange.c_str());                
                 sincedecrease = 0;
@@ -232,7 +258,12 @@ public:
         } else {
             framesoverbudget = 0;
         }
-    }  
+        std::wstring command = L"r.ScreenPercentage ";
+        command.append(std::to_wstring(screenpercentage));
+        API::get()->sdk()->functions->execute_command(command.c_str());
+
+        lasttick = std::chrono::high_resolution_clock::now();
+    }      
 
 private:
     int screenpercentage = 50;
@@ -249,6 +280,8 @@ private:
     std::string lastchange = "";
     std::time_t lastchange_time = std::time(0);
     std::string configpath = "";
+    std::chrono::high_resolution_clock::time_point lasttick = std::chrono::high_resolution_clock::now();
+    bool isloading2d = false;
 
     std::string get_dll_directory() {
         HMODULE hModule = GetModuleHandle(NULL); // Get the handle of the current module (DLL or EXE)
@@ -344,16 +377,16 @@ private:
                 usageupperbound = j["usageupperbound"];
             }
             if (j.contains("decreaseframesrequired")) {
-                usageupperbound = j["decreaseframesrequired"];
+                decreaseframesrequired = j["decreaseframesrequired"];
             }
             if (j.contains("increaseframesrequired")) {
-                usageupperbound = j["increaseframesrequired"];
+                increaseframesrequired = j["increaseframesrequired"];
             }
             if (j.contains("decreaseresamount")) {
-                usageupperbound = j["decreaseresamount"];
+                decreaseresamount = j["decreaseresamount"];
             }
             if (j.contains("increaseresamount")) {
-                usageupperbound = j["increaseresamount"];
+                increaseresamount = j["increaseresamount"];
             }   
         }
     }
@@ -384,12 +417,24 @@ private:
             
             bool changed = false;
 
+            ImGui::Text("When GPU usage is below \"Usage Lower Bound\"");
+            ImGui::Text("for consecutive \"Frames Before Increasing\"");   
+            ImGui::Text("then percentage is changed by \"Increase Res By\"");   
             if (ImGui::SliderInt("Usage Lower Bound", &usagelowerbound, 60, 95)) {
                 changed = true;
                 if (usageupperbound <= usagelowerbound + 5) {
                     usageupperbound = usagelowerbound + 5;
                 }
             }
+            if (ImGui::SliderInt("Frames Before Increasing", &increaseframesrequired, 1, 1000)) {
+                changed = true;
+            }
+            if (ImGui::SliderInt("Increase Res By", &increaseresamount, 1, 20)) {
+                changed = true;
+            }            
+            ImGui::Text("When GPU usage is above \"Usage Upper Bound\"");
+            ImGui::Text("for consecutive \"Frames Before Decreasing\"");
+            ImGui::Text("then percentage is changed by \"Decrease Res By\"");   
             if (ImGui::SliderInt("Usage Upper Bound", &usageupperbound, 60, 95)) {
                 changed = true;
                 if (usagelowerbound >= usageupperbound - 5) {
@@ -399,15 +444,10 @@ private:
             if (ImGui::SliderInt("Frames Before Decreasing", &decreaseframesrequired, 1, 1000)) {
                 changed = true;                
             }
-            if (ImGui::SliderInt("Frames Before Increasing", &increaseframesrequired, 1, 1000)) {
-                changed = true;
-            }
+            
             if (ImGui::SliderInt("Decrease Res By", &decreaseresamount, 1, 20)) {
                 changed = true;
-            }
-            if (ImGui::SliderInt("Increase Res By", &increaseresamount, 1, 20)) {
-                changed = true;
-            }
+            }            
 
 
             if (changed) {
@@ -428,9 +468,7 @@ private:
             ImGui::Text("GPU usage is %d%%", get_gpu_usage());   
         }
         //API::get()->log_info("Internal frame done");
-    }
-
-    
+    }    
 
 private:
     HWND m_wnd{};
